@@ -1,0 +1,1532 @@
+use strict;
+use warnings;
+use Getopt::Long;
+use Spreadsheet::ParseExcel;
+use Text::Wrap;
+
+$Text::Wrap::columns = 80;
+
+my $warning = 0;
+my $error   = 0;
+my $is_comp = 1;
+my $gui     = 0;
+my $rusure;
+our %report;
+
+# Selects whether to open a GUI mode or in batch mode
+GetOptions ("g" => \$gui);
+
+open(my $LOG, '>', 'coverage_generator.log');
+
+# User options
+my @want = ("cov_planner", 
+            "blocks_name", 
+            "Transaction", 
+            "Name",
+            "Identifier",
+            "Description",
+            "Variable",
+            "Bins",
+            "Weight",
+            "Goal",
+            "Comment",
+            "At_least",
+            "Auto_bin_max",
+            "Cross_num_print_missing",
+            "Detect_overlap",
+            "Name_per_instance",
+            "Sheet_name",
+            "Report");
+
+
+
+my $var;
+my %d;
+
+# GUI mode is given
+if($gui eq 1) {
+  use Tk;
+
+  # Creates a window and text box is provided for user input. Default value can
+  # be given here.
+  my $window = MainWindow->new;
+
+  foreach (@want) {
+    my $lhs = $window->Label(-text => $_);
+    $d{$_} = "";
+    my $rhs = $window->Entry(-textvariable => \$d{$_});
+    $lhs -> grid($rhs);
+  }
+  
+  # Input for tool selection from which coverage report is created. 
+  my @opt1 = ('USER', 'VCS', 'QUESTA', 'IUS');
+
+  # Tool selection for dumping coverage report into xls 
+  my $opt = $window->Optionmenu(-options  => \@opt1,
+                                -command  => \&show_choice,
+                                -variable => \$var,
+                               )->pack;
+
+  my $confirm = "";
+
+  # Note - button state disabled and normal to flip back and
+  # forth between it being greyed out and active.  A much better
+  # approach than having it appear and disappear
+  $window->title("Coverage Generator");
+ 
+  # Check button for dumping coverage code in class format or only coverage
+  # mode.
+  my $comp = $window->Checkbutton(-text        => "Component",
+                                  -variable    => \$is_comp, 
+                                 )->pack(-side => 'left');
+
+  # Button to read the xls/xml coverage plan and show a window which contains all
+  # the covergroup name mentioned in the coverage plan.
+  my $cov_grp= $window->Button(-text    => "Covergroup", 
+                               -command => \&rd_cg);
+
+  # It writes all user provided information in the txt file and empty information
+  # will be retrieved back from the txt file.
+  my $done   = $window->Button(-text    => "Confirm?", 
+                               -command => \&review);
+
+  # Reads all the information from the GUI and generate the coverage code or in
+  # case of report file is available, it dumps the coverage report in the xls
+  # file.
+  $rusure = $window->Button(-text    => "Generate", 
+                            -command => \&final, 
+                            -state   => "disabled");
+
+  # Set the grid to set the button position
+  $comp   -> grid("-");
+
+  $opt    -> grid(-column => 0, -row => 19);
+  $cov_grp-> grid(-column => 1, -row => 19);
+  $done   -> grid(-column => 0, -row => 20);
+  $rusure -> grid(-column => 1, -row => 20);
+  
+  MainLoop;
+}
+# In case of batch mode
+else {
+  foreach (@want) {
+    $d{$_} = "";
+  }
+  &finalize;
+
+  # Reads all the information from the GUI and generate the coverage code or in
+  # case of report file is available, it dumps the coverage report in the xls
+  # file.
+  &final;
+}
+
+###############################################################################
+# Subroutine: show_choice 
+###############################################################################
+sub show_choice
+{
+}
+
+###############################################################################
+# Subroutine: rd_cg
+###############################################################################
+sub rd_cg {
+  my $cov_planner = $d{'cov_planner'};
+  my $Identifier  = $d{'Identifier'};
+  my $Name        = $d{'Name'};
+  my $Sheet_name  = $d{'Sheet_name'};
+
+  my $parser   = Spreadsheet::ParseExcel->new();
+
+  unless(-e $cov_planner) {
+    print "ERR_001:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Not found cov_planner (",$cov_planner,")!!! Tool can't process further.\n";
+    return;
+  }
+  
+  my $workbook = $parser->parse($cov_planner);
+  
+  if ( !defined $workbook ) {
+    die $parser->error(), ".\n";
+  }
+  
+  my $worksheet = $workbook->worksheet($Sheet_name);
+
+  if(!defined($worksheet)) {
+    print "ERR_002:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Worksheet named ",$Sheet_name," not found in ",$cov_planner,"!!! Tool can't process further.\n";
+    return;
+  }
+
+  my ( $row_min, $row_max ) = $worksheet->row_range();
+  my ( $col_min, $col_max ) = $worksheet->col_range();
+  
+  use List::MoreUtils qw(uniq);
+  my $fd_Identifier = 0;
+  my @temp_blocks_name;
+
+  for ( $row_min+1 .. $row_max ) {
+    my $cell = $worksheet->get_cell( $_, $Identifier );
+   
+    next unless $cell;
+
+    if((lc($cell->value()) eq 'coverpoint') || (lc($cell->value()) eq 'cross')) { 
+      my $cell = $worksheet->get_cell( $_, $Name );
+      my $cp_name = $cell->value();
+      $fd_Identifier = 1;
+    }
+    elsif(lc($cell->value()) eq 'covergroup') { 
+      my $cell = $worksheet->get_cell( $_, $Name );
+      my $cvg_name= $cell->value();
+      push @temp_blocks_name,$cvg_name;
+      $fd_Identifier = 1;
+    }
+    else {
+      print $LOG "ERR_003:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Invalid value (",$cell->value(),") in cell(row=",$_,", column=".$Identifier,"). ";
+	  print $LOG "Valid values are Covergroup, Coverpoint and Cross.\n";
+    }
+  }
+
+  if($fd_Identifier eq 0) {
+    print $LOG "ERR_004:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Didn't find any covergroup/coverpoint/cross. Check value provided in \"Identifier\" column. Tool can't process further.\n";
+    return;
+  }
+
+  my @blocks_name = uniq @temp_blocks_name;
+  
+  use Tk::Pane;     
+  my $mw = Tk::MainWindow->new();
+  
+  $mw->title("Covergroups");
+
+  my $mf = $mw->Frame->pack( -side => 'top', -pady => 1 );
+  
+  # Inner frames
+  my $frm_l = $mf->Frame->pack( -side => 'left',  -pady => 1 );
+  my $frm_r = $mf->Frame->pack( -side => 'right', -pady => 1 );
+
+  my @cbvalues;
+  my @cbnames;
+  my $count = 0;
+  my @check_button_grid;
+
+  foreach (@blocks_name){
+    $cbnames[$count] = $_;
+
+    if($count%2 == 0) {
+      $check_button_grid[$count] = $frm_l->Checkbutton(-text     => $_,
+                                                       -font     =>[arial => 12],
+                                                       -onvalue  => 1,
+                                                       -offvalue => 0,
+                                                       -variable => \$cbvalues[$count],
+                                                       -font     => 'big',
+                                                       -bg       => 'white',
+                                                      )->pack(-anchor=>'w')->pack();
+    }
+    else {
+       $check_button_grid[$count] = $frm_r->Checkbutton(-text     => $_,
+                                                        -font     =>[arial => 12],
+                                                        -onvalue  => 1,
+                                                        -offvalue => 0,
+                                                        -variable => \$cbvalues[$count],
+                                                        -font     => 'big',
+                                                        -bg       => 'white',
+                                                       )->pack(-anchor=>'w')->pack();
+    }
+    $count++;
+  }
+
+  my $showbutton= $mw->Button(-text=>'Selected',
+                              -bg => 'lightyellow',
+                              -command => sub{my @selected = ();
+                                              foreach ( 0.. $count ){
+                                                if ( $cbvalues[$_] ){
+                                                 push @selected, $cbnames[$_];
+                                                }
+                                              }  
+                                              print "@selected\n";
+                                              $d{'blocks_name'} = join( ',', @selected );
+                                              $mw->destroy;
+                                             })->pack();
+
+  MainLoop();
+  
+}
+
+
+###############################################################################
+# Subroutine: review 
+###############################################################################
+sub review {
+  &finalize;
+  my $confirm = "";
+  foreach (@want) {
+    $confirm .= "$_ ... $d{$_}\n";
+  }
+  $rusure->configure(-state => "normal");
+}
+
+###############################################################################
+# Subroutine: finalize 
+###############################################################################
+sub finalize {
+  my %e;
+  my $do_file_name = "coverage_generator_cfg.txt";
+
+  if(-e $do_file_name) {
+    open my $rd_e, "<", $do_file_name;
+    while( my $line = <$rd_e> ) {
+      my ($field, $value) = split(/=/, $line);
+      chomp($value);
+      $field =~ s/^\s+|\s+$//g;
+      $value =~ s/^\s+|\s+$//g;
+      if((uc($field) =~ m/COMPONENT/) && ($gui eq 0)) { $is_comp = $value;}
+      elsif((uc($field) =~ m/TOOL/) && ($gui eq 0)) {
+        $value = uc($value);
+        if(($value eq "VCS") || ($value eq "QUESTA") || 
+           ($value eq "IUS") || ($value eq "USER")) {
+          $var = $value;
+        }
+        else {
+          print $LOG "ERR_005:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Unsupported option is given for Tool. ";
+		  print $LOG "Provided option is ",$value," and valid options are VCS, QUESTA, IUS, USER.\n";
+        }
+      }
+      else { $e{$field} = $value; }
+    }
+    close $rd_e;
+  }
+  foreach (@want) {
+    if($d{$_} eq "") {
+      if(($e{$_} eq "")       && (($_ eq "cov_planner") || 
+         ($_ eq "block_name") || ($_ eq "Transaction") || 
+         ($_ eq "Name")       || ($_ eq "Identifier") || 
+         ($_ eq "Sheet_name"))) { 
+        print "ERR_006:FILE: ",__FILE__,"  LINE: ",__LINE__," "."  Information for ",$_," is not exists. Tool can't process further.\n"; 
+        return;
+      }
+      else { 
+        if(($_ eq "Name")           || ($_ eq "Identifier") || ($_ eq "Description") ||
+           ($_ eq "Variable")       || ($_ eq "Bins")       || ($_ eq "Weight")      || 
+           ($_ eq "Goal")           || ($_ eq "Comment")    || ($_ eq "At_least")    ||
+           ($_ eq "Auto_bin_max")   || ($_ eq "Cross_num_print_missing") ||
+           ($_ eq "Detect_overlap") || ($_ eq "Name_per_instance")) {
+          if($e{$_} eq 'X') { $d{$_} = ''; }
+          elsif ($e{$_} =~ /^\d+?$/) { $d{$_} = $e{$_}; }   
+        }
+        else {
+          if($_ ne "Report") { $d{$_} = $e{$_}; } 
+        }
+      }
+    }
+  }
+  open(my $do, '>', 'coverage_generator_cfg.txt');
+  foreach (@want) {
+    print $do $_,"=",$d{$_},"\n";
+  }
+  print $do "Component=",$is_comp,"\n";
+  close($do);
+}
+
+###############################################################################
+# Subroutine: final 
+###############################################################################
+sub final {
+  my %col_num;
+  my $cov_planner                     = $d{'cov_planner'};
+  my @blocks_name                     = $d{'blocks_name'};
+  my $Sheet_name                      = $d{'Sheet_name'};
+  my $block_item                      = $d{'Transaction'};
+  my $report_file                     = $d{'Report'};
+  $col_num{'Identifier'}              = $d{'Identifier'};
+  $col_num{'Name'}                    = $d{'Name'};
+  $col_num{'Description'}             = $d{'Description'};
+  $col_num{'Variable'}                = $d{'Variable'};
+  $col_num{'Bins'}                    = $d{'Bins'};
+  $col_num{'Weight'}                  = $d{'Weight'};
+  $col_num{'Goal'}                    = $d{'Goal'};
+  $col_num{'Comment'}                 = $d{"Comment"};
+  $col_num{'At_least'}                = $d{"At_least"};
+  $col_num{'Auto_bin_max'}            = $d{"Auto_bin_max"};
+  $col_num{'Cross_num_print_missing'} = $d{"Cross_num_print_missing"};
+  $col_num{'Detect_overlap'}          = $d{"Detect_overlap"};
+  $col_num{'Name_per_instance'}       = $d{"Name_per_instance"};
+
+  my $parser   = Spreadsheet::ParseExcel->new();
+
+  unless(-e $cov_planner) {
+    print "ERR_001:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Not found cov_planner (",$cov_planner,")!!! Tool can't process further.\n";
+    return;
+  }
+  
+  if($d{'blocks_name'} eq '') {
+    print "ERR_007:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Block names not provided. Tool can't process further.\n";
+    return;
+  }
+  elsif($d{'blocks_name'} eq 'all') {
+  }
+  else {
+    @blocks_name = split(/,/,join(',',@blocks_name));
+  }
+
+  foreach (keys %col_num) {
+    $col_num{$_} =~ s/^\s+|\s+$//g; 
+    # Checking whether the value is decimal or not
+    if (($col_num{$_} ne "") && !($col_num{$_} =~  /^\d+?$/)) {
+      print "ERR_008:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Value for ",$_," is ",$col_num{$_},". It must be a decimal number.\n";
+      return;
+    }
+  }
+
+  my ($file_name, $ext_name) = split(/\./, $cov_planner);
+  if($ext_name eq 'xml') {
+    use XML::Simple;
+    use Data::Dumper;
+    use Spreadsheet::WriteExcel;
+    my $booklist = XMLin($cov_planner);
+    
+    my @a; 
+    for (0 .. $#{$booklist->{'Worksheet'}{'Table'}{'Row'}}) {
+      while (my($key, $value) = each %{$booklist->{'Worksheet'}{'Table'}{'Row'}[$_]}) {
+        if($key eq 'Cell') {
+          push @a, $value;
+        }
+      }
+    }
+    
+    my $wr_workbook = Spreadsheet::WriteExcel->new($file_name.'.xls');
+    
+    # Add a worksheet
+    my $worksheet = $wr_workbook->add_worksheet('Testplan');
+    
+    my $m='Data';
+    for (0 .. $#a) {
+      for(my $i=0; $i < @{$a[$_]}; $i++) {
+        $worksheet->write($_, $i, $a[$_][$i]{$m}{'content'});
+      }
+    }
+    $cov_planner = $file_name.".xls";
+  }
+
+  my $workbook = $parser->parse($cov_planner);
+  
+  if ( !defined $workbook ) {
+      die $parser->error(), ".\n";
+  }
+  
+  my $worksheet = $workbook->worksheet($Sheet_name);
+  if(!defined($worksheet)) {
+    print "ERR_002:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Worksheet named ",$Sheet_name," not found in ",$cov_planner,"!!! Tool can't process further.\n";
+    return;
+  }
+  my ( $row_min, $row_max ) = $worksheet->row_range();
+  my ( $col_min, $col_max ) = $worksheet->col_range();
+
+  if($report_file) {
+    my ($col, $l_report_file) = split(/,/, $report_file);
+    if($var eq "VCS") {
+      synopsys_result($l_report_file);
+    }
+    elsif($var eq "QUESTA") {
+      mentor_result($l_report_file);
+    }
+    elsif($var eq "IUS") {
+      cadence_result($l_report_file);
+    }
+    elsif($var eq "USER") {
+# TODO: Error when file not found.
+      require "coverage_generator_user_cfg.pl.txt";
+      user_result($l_report_file);
+    }
+    else {
+        print $LOG "ERR_005:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Invalid tool name is provided in Report. Provided value is ",$var,"\n";
+    }
+    use Spreadsheet::ParseExcel;
+    use Spreadsheet::ParseExcel::SaveParser;
+
+    # Open the template with SaveParser
+    my $parser   = new Spreadsheet::ParseExcel::SaveParser;
+    my $template = $parser->Parse($cov_planner);
+
+    # The SaveParser SaveAs() method returns a reference to a
+    # Spreadsheet::WriteExcel object. If you wish you can then
+    # use this to access any of the methods that aren't
+    # available from the SaveParser object. If you don't need
+    # to do this just use SaveAs().
+    my $workbook;
+    {
+        # SaveAs generates a lot of harmless warnings about unset
+        # Worksheet properties. You can ignore them if you wish.
+        local $^W = 0;
+
+        # Rewrite the file or save as a new file
+        $workbook = $template->SaveAs('new.xls');
+    }
+
+    # Use Spreadsheet::WriteExcel methods
+    my $temp_worksheet  = $workbook->sheets(1);
+
+    my $cvg_name;
+    for my $row ( $row_min .. $row_max ) {
+      if($row > 0) {
+        my $cell = $worksheet->get_cell( $row, $col_num{'Identifier'});
+    
+        next unless $cell;
+
+        if((lc($cell->value()) eq 'coverpoint') || (lc($cell->value()) eq 'cross')) { 
+          my $cell = $worksheet->get_cell( $row, $col_num{'Name'} );
+          my $cp_name = $cell->value();
+          $cp_name =~ s/^\s+|\s+$//g;
+          if(exists $report{$cvg_name}{$cp_name}) {
+            my $format = $workbook->add_format(); # Add a format
+            $format->set_bold();
+            if(($report{$cvg_name}{$cp_name} < 10.00) &&
+               ($report{$cvg_name}{$cp_name} >= 00.00)) {
+              $format->set_bg_color('red');
+            }
+            if(($report{$cvg_name}{$cp_name} < 50.00) &&
+               ($report{$cvg_name}{$cp_name} > 10.01)) {
+              $format->set_bg_color('orange');
+            }
+            if(($report{$cvg_name}{$cp_name} < 99.99) &&
+               ($report{$cvg_name}{$cp_name} > 50.01)) {
+              $format->set_bg_color('yellow');
+            }
+            if($report{$cvg_name}{$cp_name} == 100.00) {
+              $format->set_bg_color('green');
+            }
+            $format->set_align('center');
+
+            $temp_worksheet->write($row, $col, $report{$cvg_name}{$cp_name}, $format);
+          }
+        }
+        elsif(lc($cell->value()) eq 'covergroup') { 
+          my $cell = $worksheet->get_cell( $row, $col_num{'Name'} );
+          $cvg_name = $cell->value();
+          $cvg_name =~ s/^\s+|\s+$//g;
+          $temp_worksheet->write($row, $col, $report{$cvg_name}{'covergroup'});
+        }
+      }
+      else {
+        my $format = $workbook->add_format(); # Add a format
+        $format->set_bold();
+        $format->set_align('center');
+        $temp_worksheet->write($row, $col, "RESULT", $format);
+      }
+    }
+    $workbook->close();
+    if(($error eq 0) && ($warning eq 0)) {
+      print "\nCOVERAGE DUMPED SUCCESSFUL\n";
+    }
+    else {
+      print "\nCOVERAGE DUMPED FAILED. ERROR=",$error," and WARNING=",$warning,"\n";
+    }
+  }
+  else {
+    ########################
+    # Read the coverage plan and get all covergroups name in case user wants to
+    # create code for all covergroups.
+    if($d{'blocks_name'} eq 'all') {
+      my $fd_Identifier = 0;
+      for my $row ( $row_min+1 .. $row_max ) {
+        my $cell = $worksheet->get_cell( $row, $col_num{'Identifier'} );
+      
+        next unless $cell;
+  
+        if(lc($cell->value()) eq 'covergroup') { 
+          my $cell = $worksheet->get_cell( $row, $col_num{'Name'} );
+          push @blocks_name,$cell->value();
+          $fd_Identifier = 1;
+        }
+      }
+      # If no covergroup is mentioned in the plan then it gives error
+      if($fd_Identifier eq 0) {
+        print $LOG "ERR_004:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Didn't find any covergroup/coverpoint/cross. ";
+		print $LOG "Check value provided in \"Identifier\" column. Tool can't process further.\n";
+		return;
+      }
+    }
+   
+    ########################
+    my %coverpoint;
+    my %cross;
+    my %covergroup;
+  
+    my $cell_01_nam;
+    my $cell_02_ide;
+    my $cell_03_des;
+    my $cell_04_bin;
+    my $cell_05_wei;
+    my $cell_06_goa;
+    my $cell_07_com;
+    my $cell_08_atl;
+    my $cell_09_aut;
+    my $cell_10_mis;
+    my $cell_11_ove;
+    my $cell_12_ins;
+    my $cell_13_var;
+
+    my $row_num = "Row";
+    my $row_des = "Description";
+    my $row_var = "Variable";
+    my $row_bin = "Bins";
+    my $row_wei = "Weight";
+    my $row_goa = "Goal";
+    my $row_com = "Comment";
+    my $row_atl = "At_least";
+    my $row_aut = "Auto_bin_max";
+    my $row_mis = "Cross_num_print_missing";
+    my $row_ove = "Detect_overlap";
+    my $row_ins = "Name_per_instance";
+ 
+    my $t_cvg_num;
+    my $t_cvg_name;
+    my $t_cp_name;
+    my $t_cr_name;
+
+    for my $row ( $row_min+1 .. $row_max ) {
+      my $cell = $worksheet->get_cell( $row, $col_num{'Identifier'} );
+      
+      next unless $cell;
+      if(lc($cell->value()) eq "coverpoint") {
+        my $cp_num = $worksheet->get_cell( $row, $col_num{'Name'});
+        $t_cp_name = $cp_num->value();
+        chomp $t_cp_name;
+        $t_cp_name =~ s/^\s+|\s+$//g;
+        if(defined ($t_cvg_name)) {
+          $t_cp_name = $t_cvg_name.":".$t_cp_name;
+          if (!exists($coverpoint{$t_cp_name})) {
+            $coverpoint{$t_cp_name}{$row_num} = $row; 
+          }
+          if($col_num{'Description'} ne "") {
+            $cell_03_des = $worksheet->get_cell( $row, $col_num{'Description'} );
+            if(defined $cell_03_des) { 
+              $coverpoint{$t_cp_name}{$row_des} = $cell_03_des->value(); 
+              $coverpoint{$t_cp_name}{$row_des} =~ s/^\s+|\s+$//g;
+            } 
+          }
+          if($col_num{'Bins'} ne "") {
+            $cell_04_bin = $worksheet->get_cell( $row, $col_num{'Bins'} );
+            if(defined $cell_04_bin) { 
+              $coverpoint{$t_cp_name}{$row_bin} = $cell_04_bin->value();
+              $coverpoint{$t_cp_name}{$row_bin} =~ s/^\s+|\s+$//g; 
+            }
+          }
+          if($col_num{'Weight'} ne "") {
+            $cell_05_wei = $worksheet->get_cell( $row, $col_num{'Weight'} );
+            if(defined $cell_05_wei) { 
+              $coverpoint{$t_cp_name}{$row_wei} = $cell_05_wei->value();
+              $coverpoint{$t_cp_name}{$row_wei} =~ s/^\s+|\s+$//g; 
+              if (!($coverpoint{$t_cp_name}{$row_wei} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Weight'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Goal'} ne "") {
+            $cell_06_goa = $worksheet->get_cell( $row, $col_num{'Goal'} );
+            if(defined $cell_06_goa) { 
+              $coverpoint{$t_cp_name}{$row_goa} = $cell_06_goa->value();
+              $coverpoint{$t_cp_name}{$row_goa} =~ s/^\s+|\s+$//g; 
+              if (!($coverpoint{$t_cp_name}{$row_goa} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Goal'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Comment'} ne "") {
+            $cell_07_com = $worksheet->get_cell( $row, $col_num{'Comment'} );
+            if(defined $cell_07_com) { 
+              $coverpoint{$t_cp_name}{$row_com} = $cell_07_com->value();
+              $coverpoint{$t_cp_name}{$row_com} =~ s/^\s+|\s+$//g; 
+            }
+          }
+          if($col_num{'At_least'} ne "") {
+            $cell_08_atl = $worksheet->get_cell( $row, $col_num{'At_least'} );
+            if(defined $cell_08_atl) { 
+              $coverpoint{$t_cp_name}{$row_atl} = $cell_08_atl->value();
+              $coverpoint{$t_cp_name}{$row_atl} =~ s/^\s+|\s+$//g; 
+              if (!($coverpoint{$t_cp_name}{$row_atl} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'At_least'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Auto_bin_max'} ne "") {
+            $cell_09_aut = $worksheet->get_cell( $row, $col_num{'Auto_bin_max'} );
+            if(defined $cell_09_aut) { 
+              $coverpoint{$t_cp_name}{$row_aut} = $cell_09_aut->value();
+              $coverpoint{$t_cp_name}{$row_aut} =~ s/^\s+|\s+$//g; 
+              if (!($coverpoint{$t_cp_name}{$row_aut} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Auto_bin_max'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Cross_num_print_missing'} ne "") {
+            $cell_10_mis = $worksheet->get_cell( $row, $col_num{'Cross_num_print_missing'} );
+            if(defined $cell_10_mis) { 
+              $coverpoint{$t_cp_name}{$row_mis} = $cell_10_mis->value();
+              $coverpoint{$t_cp_name}{$row_mis} =~ s/^\s+|\s+$//g; 
+              print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Cross_num_print_missing'}. " shall be empty due to unsupported option.\n";
+            }
+          }
+          if($col_num{'Detect_overlap'} ne "") {
+            $cell_11_ove = $worksheet->get_cell( $row, $col_num{'Detect_overlap'} );
+            if(defined $cell_11_ove) { 
+              $coverpoint{$t_cp_name}{$row_ove} = $cell_11_ove->value();
+              $coverpoint{$t_cp_name}{$row_ove} =~ s/^\s+|\s+$//g; 
+              if (!($coverpoint{$t_cp_name}{$row_ove} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Auto_bin_max'}. " shall contain only bit value.\n";
+			  }
+			  elsif(!(($coverpoint{$t_cp_name}{$row_ove} eq 0) || ($coverpoint{$t_cp_name}{$row_ove} eq 1))) {
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Detect_overlap'}. " shall contain only bit value.\n";
+			  }
+            }
+          }
+          if($col_num{'Name_per_instance'} ne "") {
+            $cell_12_ins = $worksheet->get_cell( $row, $col_num{'Name_per_instance'} );
+            if(defined $cell_12_ins) { 
+              $coverpoint{$t_cp_name}{$row_ins} = $cell_12_ins->value();
+              $coverpoint{$t_cp_name}{$row_ins} =~ s/^\s+|\s+$//g; 
+              print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Name_per_instance'}. " shall be empty due to unsupported option.\n";
+            }
+          }
+          if($col_num{'Variable'} ne "") {
+            $cell_13_var = $worksheet->get_cell( $row, $col_num{'Variable'} );
+            if(defined $cell_13_var) { 
+              $coverpoint{$t_cp_name}{$row_var} = $cell_13_var->value();
+              $coverpoint{$t_cp_name}{$row_var} =~ s/^\s+|\s+$//g; 
+            }
+          }
+        }
+        else {
+          print $LOG "ERR_011:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Covergroup not defined for $t_cp_name coverpoint.\n";
+        }
+      }
+      elsif(lc($cell->value()) eq "cross") {
+        my $cr_num = $worksheet->get_cell( $row, $col_num{'Name'});
+        $t_cr_name = $cr_num->value();
+        chomp $t_cr_name;
+        $t_cr_name =~ s/^\s+|\s+$//g;
+        if(defined ($t_cvg_name)) {
+          $t_cr_name = $t_cvg_name.":".$t_cr_name;
+          if (!exists($coverpoint{$t_cr_name})) {
+            $cross{$t_cr_name}{$row_num} = $row; 
+          }
+          if($col_num{'Description'} ne "") {
+            $cell_03_des = $worksheet->get_cell( $row, $col_num{'Description'} );
+            if(defined $cell_03_des) { 
+              $cross{$t_cr_name}{$row_des} = $cell_03_des->value(); 
+              $cross{$t_cr_name}{$row_des} =~ s/^\s+|\s+$//g;
+            }
+          }
+          if($col_num{'Bins'} ne "") {
+            $cell_04_bin = $worksheet->get_cell( $row, $col_num{'Bins'} );
+            if(defined $cell_04_bin) { 
+              $cross{$t_cr_name}{$row_bin} = $cell_04_bin->value(); 
+              $cross{$t_cr_name}{$row_bin} =~ s/^\s+|\s+$//g;
+            }
+          }
+          if($col_num{'Weight'} ne "") {
+            $cell_05_wei = $worksheet->get_cell( $row, $col_num{'Weight'} );
+            if(defined $cell_05_wei) { 
+              $cross{$t_cr_name}{$row_wei} = $cell_05_wei->value(); 
+              $cross{$t_cr_name}{$row_wei} =~ s/^\s+|\s+$//g;
+              if (!($cross{$t_cr_name}{$row_wei} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Weight'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Goal'} ne "") {
+            $cell_06_goa = $worksheet->get_cell( $row, $col_num{'Goal'} );
+            if(defined $cell_06_goa) { 
+              $cross{$t_cr_name}{$row_goa} = $cell_06_goa->value(); 
+              $cross{$t_cr_name}{$row_goa} =~ s/^\s+|\s+$//g;
+              if (!($cross{$t_cr_name}{$row_goa} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Goal'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Comment'} ne "") {
+            $cell_07_com = $worksheet->get_cell( $row, $col_num{'Comment'} );
+            if(defined $cell_07_com) { 
+              $cross{$t_cr_name}{$row_com} = $cell_07_com->value(); 
+              $cross{$t_cr_name}{$row_com} =~ s/^\s+|\s+$//g;
+            }
+          }
+          if($col_num{'At_least'} ne "") {
+            $cell_08_atl = $worksheet->get_cell( $row, $col_num{'At_least'} );
+            if(defined $cell_08_atl) { 
+              $cross{$t_cr_name}{$row_atl} = $cell_08_atl->value(); 
+              $cross{$t_cr_name}{$row_atl} =~ s/^\s+|\s+$//g;
+              if (!($cross{$t_cr_name}{$row_atl} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'At_least'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Auto_bin_max'} ne "") {
+            $cell_09_aut = $worksheet->get_cell( $row, $col_num{'Auto_bin_max'} );
+            if(defined $cell_09_aut) { 
+              $cross{$t_cr_name}{$row_aut} = $cell_09_aut->value(); 
+              $cross{$t_cr_name}{$row_aut} =~ s/^\s+|\s+$//g;
+              print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Auto_bin_max'}. " shall be empty due to unsupported option.\n";
+            }
+          }
+          if($col_num{'Cross_num_print_missing'} ne "") {
+            $cell_10_mis = $worksheet->get_cell( $row, $col_num{'Cross_num_print_missing'} ) ;
+            if(defined $cell_10_mis) { 
+              $cross{$t_cr_name}{$row_mis} = $cell_10_mis->value(); 
+              $cross{$t_cr_name}{$row_mis} =~ s/^\s+|\s+$//g;
+              if (!($cross{$t_cr_name}{$row_mis} =~ /^\d+$/)) { 
+                print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			    print $LOG "Cell: Row ".$row." Column: ".$col_num{'Cross_num_print_missing'}. " shall contain only int value.\n";
+			  }
+            }
+          }
+          if($col_num{'Detect_overlap'} ne "") {
+            $cell_11_ove = $worksheet->get_cell( $row, $col_num{'Detect_overlap'} );
+            if(defined $cell_11_ove) { 
+              $cross{$t_cr_name}{$row_ove} = $cell_11_ove->value(); 
+              $cross{$t_cr_name}{$row_ove} =~ s/^\s+|\s+$//g;
+              print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Detect_overlap'}. " shall be empty due to unsupported option.\n";
+            }
+          }
+          if($col_num{'Name_per_instance'} ne "") {
+            $cell_12_ins = $worksheet->get_cell( $row, $col_num{'Name_per_instance'} );
+            if(defined $cell_12_ins) { 
+              $cross{$t_cr_name}{$row_ins} = $cell_12_ins->value(); 
+              $cross{$t_cr_name}{$row_ins} =~ s/^\s+|\s+$//g;
+              print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Name_per_instance'}. " shall be empty due to unsupported option.\n";
+            }
+          }
+          if($col_num{'Variable'} ne "") {
+            $cell_13_var = $worksheet->get_cell( $row, $col_num{'Variable'} );
+            if(defined $cell_13_var) { 
+              $cross{$t_cr_name}{$row_var} = $cell_13_var->value(); 
+              $cross{$t_cr_name}{$row_var} =~ s/^\s+|\s+$//g;
+            }
+          }
+        }
+        else {
+          print $LOG "ERR_011:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Covergroup not defined for $t_cr_name cross.\n";
+        }
+      }
+      elsif(lc($cell->value()) eq "covergroup") {
+        $t_cvg_num = $worksheet->get_cell( $row, $col_num{'Name'});
+        $t_cvg_name = $t_cvg_num->value();
+        chomp $t_cvg_name;
+        $t_cvg_name =~ s/^\s+|\s+$//g;
+
+        if($col_num{'Description'} ne "") {
+          $cell_03_des = $worksheet->get_cell( $row, $col_num{'Description'} );
+          if(defined $cell_03_des) { 
+            $covergroup{$t_cvg_name}{$row_des} = $cell_03_des->value(); 
+            $covergroup{$t_cvg_name}{$row_des} =~ s/^\s+|\s+$//g;
+          }
+        }
+        if($col_num{'Bins'} ne "") {
+          $cell_04_bin = $worksheet->get_cell( $row, $col_num{'Bins'} );
+          if(defined $cell_04_bin) { 
+            $covergroup{$t_cvg_name}{$row_bin} = $cell_04_bin->value(); 
+            $covergroup{$t_cvg_name}{$row_bin} =~ s/^\s+|\s+$//g;
+          }
+        }
+        if($col_num{'Weight'} ne "") {
+          $cell_05_wei = $worksheet->get_cell( $row, $col_num{'Weight'} );
+          if(defined $cell_05_wei) { 
+            $covergroup{$t_cvg_name}{$row_wei} = $cell_05_wei->value(); 
+            $covergroup{$t_cvg_name}{$row_wei} =~ s/^\s+|\s+$//g;
+            if (!($covergroup{$t_cvg_name}{$row_wei} =~ /^\d+$/)) { 
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Weight'}. " shall contain only int value.\n";
+			}
+          }
+        }
+        if($col_num{'Goal'} ne "") {
+          $cell_06_goa = $worksheet->get_cell( $row, $col_num{'Goal'} );
+          if(defined $cell_06_goa) { 
+            $covergroup{$t_cvg_name}{$row_goa} = $cell_06_goa->value(); 
+            $covergroup{$t_cvg_name}{$row_goa} =~ s/^\s+|\s+$//g;
+            if (!($covergroup{$t_cvg_name}{$row_goa} =~ /^\d+$/)) { 
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Goal'}. " shall contain only int value.\n";
+			}
+          }
+        }
+        if($col_num{'Comment'} ne "") {
+          $cell_07_com = $worksheet->get_cell( $row, $col_num{'Comment'} );
+          if(defined $cell_07_com) { 
+            $covergroup{$t_cvg_name}{$row_com} = $cell_07_com->value(); 
+            $covergroup{$t_cvg_name}{$row_com} =~ s/^\s+|\s+$//g;
+          }
+        }
+        if($col_num{'At_least'} ne "") {
+          $cell_08_atl = $worksheet->get_cell( $row, $col_num{'At_least'} );
+          if(defined $cell_08_atl) { 
+            $covergroup{$t_cvg_name}{$row_atl} = $cell_08_atl->value(); 
+            $covergroup{$t_cvg_name}{$row_atl} =~ s/^\s+|\s+$//g;
+            if (!($covergroup{$t_cvg_name}{$row_atl} =~ /^\d+$/)) { 
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'At_least'}. " shall contain only int value.\n";
+			}
+          }
+        }
+        if($col_num{'Auto_bin_max'} ne "") {
+          $cell_09_aut = $worksheet->get_cell( $row, $col_num{'Auto_bin_max'} );
+          if(defined $cell_09_aut) { 
+            $covergroup{$t_cvg_name}{$row_aut} = $cell_09_aut->value(); 
+            $covergroup{$t_cvg_name}{$row_aut} =~ s/^\s+|\s+$//g;
+            if (!($covergroup{$t_cvg_name}{$row_aut} =~ /^\d+$/)) { 
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Auto_bin_max'}. " shall contain only int value.\n";
+			}
+          }
+        }
+        if($col_num{'Cross_num_print_missing'} ne "") {
+          $cell_10_mis = $worksheet->get_cell( $row, $col_num{'Cross_num_print_missing'} ) ;
+          if(defined $cell_10_mis) { 
+            $covergroup{$t_cvg_name}{$row_mis} = $cell_10_mis->value(); 
+            $covergroup{$t_cvg_name}{$row_mis} =~ s/^\s+|\s+$//g;
+            if (!($covergroup{$t_cvg_name}{$row_mis} =~ /^\d+$/)) { 
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Cross_num_print_missing'}. " shall contain only int value.\n";
+			}
+          }
+        }
+        if($col_num{'Detect_overlap'} ne "") {
+          $cell_11_ove = $worksheet->get_cell( $row, $col_num{'Detect_overlap'} );
+          if(defined $cell_11_ove) { 
+            $covergroup{$t_cvg_name}{$row_ove} = $cell_11_ove->value(); 
+            $covergroup{$t_cvg_name}{$row_ove} =~ s/^\s+|\s+$//g;
+            if (!($covergroup{$t_cvg_name}{$row_ove} =~ /^\d+$/)) { 
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Detect_overlap'}. " shall contain only bit value.\n";
+			}
+			elsif(!(($covergroup{$t_cvg_name}{$row_ove} eq 0) || ($covergroup{$t_cvg_name}{$row_ove} eq 1))) {
+              print $LOG "ERR_014:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
+			  print $LOG "Cell: Row ".$row." Column: ".$col_num{'Detect_overlap'}. " shall contain only bit value.\n";
+			}
+          }
+        }
+        if($col_num{'Name_per_instance'} ne "") {
+          $cell_12_ins = $worksheet->get_cell( $row, $col_num{'Name_per_instance'} );
+          if(defined $cell_12_ins) { 
+            $covergroup{$t_cvg_name}{$row_ins} = $cell_12_ins->value(); 
+            $covergroup{$t_cvg_name}{$row_ins} =~ s/^\s+|\s+$//g;
+          }
+        }
+        if($col_num{'Variable'} ne "") {
+          $cell_13_var = $worksheet->get_cell( $row, $col_num{'Variable'} );
+          if(defined $cell_13_var) { 
+            $covergroup{$t_cvg_name}{$row_var} = $cell_13_var->value(); 
+            $covergroup{$t_cvg_name}{$row_var} =~ s/^\s+|\s+$//g;
+          }
+        }
+      }
+    }
+
+
+    my $block_inst       = $block_item."_pkt";
+    my $block_cov_class  = $block_item."_coverage";
+    
+    open(my $fh, '>', $block_cov_class.'.sv');
+    if($is_comp eq 1) {
+      print $fh "class ", $block_cov_class," extends uvm_subscriber#(",$block_item,");\n\n";
+    
+      print $fh " `include \"coverage_fields.sv\"\n\n";
+      print $fh "  \/\/ Variable: ",$block_inst,"\n";
+      print $fh "  \/\/\n";
+      print $fh "  \/\/ Specifies transaction class handle for sampling.\n";
+      print $fh "  ",$block_item," ",$block_inst,";\n\n";
+    
+      print $fh "  \/\/ Variable: cov_ap\n";
+      print $fh "  \/\/\n";
+      print $fh "  \/\/ Specifies analysis implementation for getting transaction from driver \n";
+      print $fh "  \/\/ or monitor.\n";
+      print $fh "  uvm_analysis_imp #(",$block_item,", ",$block_cov_class,") cov_ap;\n\n"; 
+      
+      print $fh "  \/\/ Variable: covfifo\n";
+      print $fh "  \/\/\n";
+      print $fh "  \/\/ Specifies fifo for storing the received transaction.\n";
+      print $fh "  uvm_tlm_fifo #(",$block_item,") covfifo;\n\n"; 
+       
+      print $fh "  `uvm_component_utils(",$block_cov_class,")\n\n";
+    }
+  
+    for my $block_name ( @blocks_name ) {
+      my $block_cov = $block_name;
+      my $index;
+      my $cvg_avail = 0;
+  
+      if(exists $covergroup{$block_name}{$row_des}) {
+        print $fh wrap('  // ', '  // ', $covergroup{$block_name}{$row_des});
+        print $fh "\n";
+      }
+      print $fh "  covergroup ",$block_cov;
+    
+      if (exists $covergroup{$block_name}{$row_var}) { print $fh $covergroup{$block_name}{$row_var}; }
+      print $fh ";\n\n";
+
+      if (exists $covergroup{$block_name}{$row_ins}) { 
+          my $inst = substr $covergroup{$block_name}{$row_ins}, 0, 1;
+          my $stri = substr $covergroup{$block_name}{$row_ins}, 2;
+
+          if ($inst =~ /^\d$/) { print $fh "    option.per_instance = ",$inst,";\n"; }   
+          if ($stri ne "") {print $fh "    option.name = ",$stri,";\n"; } 
+      }
+      if (exists $covergroup{$block_name}{$row_wei}) { 
+          print $fh "    option.weight = ",$covergroup{$block_name}{$row_wei},";\n"; 
+      }
+      if (exists $covergroup{$block_name}{$row_goa}) {
+          print $fh "    option.goal = ",$covergroup{$block_name}{$row_goa},";\n"; 
+      }
+      if (exists $covergroup{$block_name}{$row_com}) { 
+          print $fh "    option.comment = ",$covergroup{$block_name}{$row_com},";\n"; 
+      }
+      if (exists $covergroup{$block_name}{$row_atl}) { 
+          print $fh "    option.at_least = ",$covergroup{$block_name}{$row_atl},";\n"; 
+      }
+      if (exists $covergroup{$block_name}{$row_aut}) { 
+          print $fh "    option.auto_bin_max = ",$covergroup{$block_name}{$row_aut},";\n"; 
+      }
+      if (exists $covergroup{$block_name}{$row_mis}) {
+        print $fh "    option.cross_num_print_missing = ",$covergroup{$block_name}{$row_mis},";\n"; 
+      }
+      if (exists $covergroup{$block_name}{$row_ove}) { 
+          print $fh "    option.detect_overlap = ",$covergroup{$block_name}{$row_ove},";\n"; 
+      }
+
+      print $fh "\n";
+      foreach my $key_cvp_nam (keys %coverpoint) {
+        my ($cvg_name, $cp_name) = split(/:/, $key_cvp_nam);
+        if($cvg_name eq $block_cov) {
+
+          # Printing description over coverpoint and cross
+          if (exists $coverpoint{$key_cvp_nam}{$row_des}) {
+              print $fh wrap('    // ', '    // ', $coverpoint{$key_cvp_nam}{$row_des});
+              print $fh "\n";
+          }
+           
+          if(!($cp_name =~ m/^([a-z]|[A-Z])/)) { 
+            $error++;
+            print $LOG "ERR_009:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Coverpoint name ".$cp_name." is not proper at row ",$coverpoint{$t_cp_name}{$row_num}," and will get compilation error.\n";
+          }
+          else { print $fh "    ",$cp_name," : coverpoint "; }
+
+          if (exists $coverpoint{$key_cvp_nam}{$row_var}) { print $fh $coverpoint{$key_cvp_nam}{$row_var}; }
+          else {
+            print $LOG "ERR_010:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Sampling variable is not provided for coverpoint at row ",$coverpoint{$t_cp_name}{$row_num},"\n";
+            $error++;
+          }
+
+          if ((exists $coverpoint{$key_cvp_nam}{$row_bin}) ||
+              (exists $coverpoint{$key_cvp_nam}{$row_wei}) ||
+              (exists $coverpoint{$key_cvp_nam}{$row_goa}) ||
+              (exists $coverpoint{$key_cvp_nam}{$row_com}) ||
+              (exists $coverpoint{$key_cvp_nam}{$row_atl}) ||
+              (exists $coverpoint{$key_cvp_nam}{$row_aut}) ||
+              (exists $coverpoint{$key_cvp_nam}{$row_ove})) {
+              print $fh "\n";
+              print $fh "    {\n";
+
+              if (exists $coverpoint{$key_cvp_nam}{$row_wei}) { 
+                  print $fh "      option.weight = ",$coverpoint{$key_cvp_nam}{$row_wei},";\n"; 
+              }
+              if (exists $coverpoint{$key_cvp_nam}{$row_goa}) {
+                  print $fh "      option.goal = ",$coverpoint{$key_cvp_nam}{$row_goa},";\n"; 
+              }
+              if (exists $coverpoint{$key_cvp_nam}{$row_com}) { 
+                  print $fh "      option.comment = ",$coverpoint{$key_cvp_nam}{$row_com},";\n"; 
+              }
+              if (exists $coverpoint{$key_cvp_nam}{$row_atl}) { 
+                  print $fh "      option.at_least = ",$coverpoint{$key_cvp_nam}{$row_atl},";\n"; 
+              }
+              if (exists $coverpoint{$key_cvp_nam}{$row_aut}) { 
+                  print $fh "      option.auto_bin_max = ",$coverpoint{$key_cvp_nam}{$row_aut},";\n"; 
+              }
+              if (exists $coverpoint{$key_cvp_nam}{$row_ove}) { 
+                  print $fh "      option.detect_overlap = ",$coverpoint{$key_cvp_nam}{$row_ove},";\n"; 
+              }
+
+              if (exists $coverpoint{$key_cvp_nam}{$row_bin}) {
+                my @bins = split(/\n/m, $coverpoint{$key_cvp_nam}{$row_bin});
+                for($index=0;$index<=$#bins;$index++){
+                  if($bins[$index] =~ m/^\`GBINS/) {
+                    macro_bins($bins[$index], $fh);
+                  }
+                  else {
+                    print $fh "      ",$bins[$index]," \n";
+                  }
+                }
+              }
+
+              print $fh "    }\n\n";
+          }
+          else { print $fh ";\n\n"; }
+
+          $cvg_avail = 1;
+        }
+      }
+  
+      if($cvg_avail eq 0) {
+        $error++;
+        print $LOG "ERR_009:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Coverpoint for ",$block_cov," covergroup not found.\n";
+      }
+      else { $cvg_avail = 0;}
+      
+      foreach my $key_cro_nam (keys %cross) {
+        my ($cvg_name, $cr_name) = split(/:/, $key_cro_nam);
+        if($cvg_name eq $block_cov) {
+    
+          if (exists $cross{$key_cro_nam}{$row_des}) {
+            print $fh wrap('    // ', '    // ', $cross{$key_cro_nam}{$row_des});
+            print $fh "\n";
+          }
+  
+          if(!($cr_name =~ m/^([a-z]|[A-Z])/)) { 
+            $error++;
+            print $LOG "ERR_009:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Cross name is not proper at row ",$cross{$t_cr_name}{$row_num}," and will get compilation error.\n";
+          }
+          else { print $fh "    ",$cr_name," : cross "; }
+
+          if (exists $cross{$key_cro_nam}{$row_var}) { print $fh $cross{$key_cro_nam}{$row_var}; }
+          else {
+            print $LOG "ERR_010:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Sampling variable is not provided for cross at row ",$cross{$t_cr_name}{$row_num},"\n";
+            $error++;
+          }
+
+          if ((exists $cross{$key_cro_nam}{$row_bin}) ||
+              (exists $cross{$key_cro_nam}{$row_wei}) ||
+              (exists $cross{$key_cro_nam}{$row_goa}) ||
+              (exists $cross{$key_cro_nam}{$row_com}) ||
+              (exists $cross{$key_cro_nam}{$row_atl}) ||
+              (exists $cross{$key_cro_nam}{$row_mis})) {
+              print $fh "\n";
+              print $fh "    {\n";
+
+              if (exists $cross{$key_cro_nam}{$row_wei}) {
+                print $fh "      option.weight = ",$cross{$key_cro_nam}{$row_wei},";\n"; 
+              }
+              if (exists $cross{$key_cro_nam}{$row_goa}) {
+                print $fh "      option.goal = ",$cross{$key_cro_nam}{$row_goa},";\n"; 
+              }
+              if (exists $cross{$key_cro_nam}{$row_com}) {
+                print $fh "      option.comment = ",$cross{$key_cro_nam}{$row_com},";\n"; 
+              }
+              if (exists $cross{$key_cro_nam}{$row_atl}) { 
+                print $fh "      option.at_least = ",$cross{$key_cro_nam}{$row_atl},";\n"; 
+              }
+              if (exists $cross{$key_cro_nam}{$row_mis}) {
+                print $fh "      option.cross_num_print_missing = ",$cross{$key_cro_nam}{$row_mis},";\n"; 
+              }
+              if (exists $cross{$key_cro_nam}{$row_bin}) {
+                my @bins = split(/\n/m, $cross{$key_cro_nam}{$row_bin});
+                for(0..$#bins){
+                  if($bins[$_] =~ m/^\`GBINS/) {
+                    macro_bins($bins[$_], $fh);
+                  }
+                  else {
+                     print $fh "      ",$bins[$_]," \n";
+                  }
+                }
+              }
+              print $fh "    }\n\n";
+          }
+          else { print $fh ";\n\n"; }
+
+          $cvg_avail = 1;
+        }
+      }
+      
+      if($cvg_avail eq 0) {
+        $error++;
+        print $LOG "ERR_009:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Cross for ",$block_cov," covergroup not found.\n";
+      }
+      else { $cvg_avail = 0;}
+  
+      print $fh "  endgroup : ",$block_cov,"\n\n";
+    }
+      
+    if($is_comp eq 1) {
+      print $fh "  \/\/ Function:- new\n";
+      print $fh "  extern function new (string name, uvm_component parent);\n\n";
+      
+      print $fh "  \/\/ Function: write\n";
+      print $fh "  \/\/\n";
+      print $fh "  \/\/ This method is used to get the transaction from the connected analysis\n";
+      print $fh "  \/\/ port.\n";
+      print $fh "  extern function void write(",$block_item," t);\n\n"; 
+      
+      print $fh "  \/\/ Task: run_phase\n";
+      print $fh "  \/\/\n";
+      print $fh "  \/\/ This method calls *sample_cov* method for sampling the coverage.\n";
+      print $fh "  extern run_phase(uvm_phase phase);\n\n";
+      
+      print $fh "  \/\/ Task: sample_cov\n"; 
+      print $fh "  \/\/\n";
+      print $fh "  \/\/ This method receives transaction from *covfifo* and samples the coverpoint\n";
+      print $fh "  \/\/ and crosses.This method must be overwritten in the child class for adding \n";
+      print $fh "  \/\/ sampling logic of covergroup.\n";
+      print $fh "  pure virtual task sample_cov();\n\n";
+      
+      print $fh "endclass : ",$block_cov_class,"\n\n";
+      
+      print $fh "function ",$block_cov_class,"::new(string name, uvm_component parent);\n";
+      print $fh "  super.new(name, parent);\n";
+      foreach ( @blocks_name ) {
+        print $fh "  ",$_," = new();\n";
+      }
+      print $fh "  cov_ap  = new(\"cov_ap\", this);\n";
+      print $fh "  covfifo = new(\"covfifo\", this);\n";
+      print $fh "  ",$block_inst," = ",$block_item,"::type_id::create(\"",$block_inst,"\");\n";
+      print $fh "endfunction : new\n\n";
+      
+      print $fh "function void ",$block_cov_class,"::write(",$block_item," t);\n";
+      print $fh "  void'(covfifo.try_put(t));\n";    
+      print $fh "endfunction : write\n\n";
+      
+      print $fh "task ",$block_cov_class,"::run_phase(uvm_phase phase);\n";
+      print $fh "  sample_cov();\n";
+      print $fh "endtask\n\n";
+    }
+    
+    print $fh "\n";
+    close $fh;
+  
+    close $LOG;
+  
+    if(($error eq 0) && ($warning eq 0)) {
+      print "\nCOVERAGE GENERATION SUCCESSFUL (File:",$block_cov_class,".sv)\n";
+    }
+    else {
+      print "\nCOVERAGE GENERATION FAILED. ERROR=",$error," and WARNING=",$warning,"\n";
+    }
+  }
+  exit;
+}
+
+###############################################################################
+# Subroutine: macro_bins 
+###############################################################################
+sub macro_bins {
+  
+  my ($macro, $fh) = @_;
+  my $a = '0';
+  my $b = '1';
+  my $c = '?';
+  my $i;
+  my @y = "";
+  my @z = "";
+  my $cntr0 = 0;
+  my $cntr1 = 0;
+  my $is_illegal  = 0;
+  my $is_ignore   = 0;
+  my $is_wildcard = 0;
+  my $is_pattern  = 0;
+  my $is_array    = 0;
+  use List::Util 'first';
+
+  if($macro =~ m/^\`GBINS_SIMPLE/) { $is_pattern = 0; }
+  elsif($macro =~ m/^\`GBINS_ARRAY/)  { 
+    $is_pattern = 0; 
+    $is_array   = 1;
+  }
+  elsif($macro =~ m/^\`GBINS_WILDCARD/) {
+    $is_pattern  = 0;
+    $is_wildcard = 1;
+  }
+  elsif($macro =~ m/^\`GBINS_IGNORE/) {
+    $is_pattern = 0;
+    $is_ignore  = 1;
+  }
+  elsif($macro =~ m/^\`GBINS_ILLEGAL/) {
+    $is_pattern = 0;
+    $is_illegal = 1;
+  }
+  # 001
+  # 010
+  # 100
+  elsif($macro =~ m/^\`GBINS_WALK_ONE/) {
+    $a = '1';
+    $b = '0';
+    $c = '0';
+    $is_pattern = 1;
+    $is_wildcard = 0;
+  }
+  # 001
+  # 01?
+  # 1??
+  elsif($macro =~ m/^\`GBINS_WALK_ONE_LW/) {
+    $a = '1';
+    $b = '0';
+    $c = '?';
+    $is_pattern = 1;
+    $is_wildcard = 1;
+  }
+  # ??1
+  # ?10
+  # 100
+  elsif($macro =~ m/^\`GBINS_WALK_ONE_MW/) {
+    $a = '1';
+    $b = '?';
+    $c = '0';
+    $is_pattern = 1;
+    $is_wildcard = 1;
+  }
+  # 110
+  # 101
+  # 011
+  elsif($macro =~ m/^\`GBINS_WALK_ZERO/) {
+    $a = '0';
+    $b = '1';
+    $c = '1';
+    $is_pattern = 1;
+    $is_wildcard = 0;
+  }
+  # 110
+  # 10?
+  # 0??
+  elsif($macro =~ m/^\`GBINS_WALK_ZERO_LW/) {
+    $a = '0';
+    $b = '1';
+    $c = '?';
+    $is_pattern = 1;
+    $is_wildcard = 1;
+  }
+  # ??0
+  # ?01
+  # 011
+  elsif($macro =~ m/^\`GBINS_WALK_ZERO_MW/) {
+    $a = '0';
+    $b = '?';
+    $c = '1';
+    $is_pattern = 1;
+    $is_wildcard = 1;
+  }
+  else {
+      print $LOG "ERR_012:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Unsupported option is provided for generating bins. Provided option is: $macro \n";
+	  $error++;
+  }
+
+  (my $mmr1) = ($macro =~ /.*\((.*)\)/);
+  my @words  = split /;/,$mmr1;
+  @words     = map{join(' ', split(' '))} @words;
+
+  if($is_pattern eq 1) {
+    my $B      = shift @words;
+    my @abcd   = "";
+    foreach (@words) {
+      if($_ =~ m/.*\.\./) {
+        my @f = split /\.\./, $_;
+        push @abcd, ($f[0]..$f[1]);
+      }
+      else {
+        push @abcd, $_;
+      }
+    }
+
+    my $C = $B;
+    for($B = $C; $B > 0; $B--) {
+      ++$cntr1;
+      for($i = 0; $i < $B-1; $i++) { push @y, $b; }
+      push @y, $a;
+      for($i=0; $i < $C-$B; $i++) { push @y, $c; }
+      for(my $j=$#y; $j > 0; $j--) {
+        if($cntr0 >= 4) {$cntr0 = 0; push @z, "_";}
+        push @z, $y[$j];
+        ++$cntr0;
+      }
+      my $temp=0;
+      my $temp_str;
+
+      if($is_wildcard eq 0) { $temp_str = "      bins _pbin_".$cntr1." = { $C\'b"; }
+      else { $temp_str = "      wildcard bins _pwbin_".$cntr1." = { $C\'b"; }
+
+      for(my $j=$#z; $j > 0; $j--) {
+        if(!(first{$_ eq $cntr1} @abcd)) {
+          $temp_str = $temp_str.$z[$j];
+          $temp = 1;
+        }
+      }
+      if($temp eq 1) {
+        print $fh $temp_str;
+        print $fh "};\n";
+      }
+      else { $temp_str = "";}
+
+      @y     = "";
+      @z     = "";
+      $cntr0 = 0;
+    }
+  }
+  else {
+    my $cntr = 0;
+    foreach (@words) {
+      $_ =~ s/^\s+|\s+$//g;
+      ++$cntr;    
+      if($_ =~ m/.*,.*/) {
+        my @words_1 = split /,/,$_;
+        if($is_wildcard eq 1) { print $fh "      wildcard bins _wbin_", $cntr; } 
+        elsif($is_ignore eq 1) { print $fh "      ignore_bins _ibin_", $cntr; } 
+        elsif($is_illegal eq 1) { print $fh "      illegal_bins _lbin_", $cntr; } 
+        else { print $fh "      bins _sbin_", $cntr; } 
+        if($is_array eq 1) {my $array_size = shift @words_1; print $fh "[",$array_size,"]";}
+        print $fh " = {";
+        foreach (@words_1) {
+          $_ =~ s/^\s+|\s+$//g;
+          if($_ =~ m/.*\.\..*/) {
+            my @f = split /\.\./, $_;
+            $f[0] =~ s/^\s+|\s+$//g;
+            $f[1] =~ s/^\s+|\s+$//g;
+            print $fh "[",$f[0],":",$f[1],"]";
+          }
+          else {
+            print $fh $_;
+          }
+          if(\$_ != \$words_1[-1]) { print $fh ", ";}
+        }
+        print $fh "}\n";
+      }
+      else { 
+        if($_ =~ m/.*\.\..*/) {
+          my @f = split /\.\./, $_;
+          $f[0] =~ s/^\s+|\s+$//g;
+          $f[1] =~ s/^\s+|\s+$//g;
+          if($is_wildcard eq 1) { print $fh "      wildcard bins _wbin_",$cntr; }
+          elsif($is_ignore eq 1) { print $fh "      ignore_bins _ibin_",$cntr; }
+          elsif($is_illegal eq 1) { print $fh "      illegal_bins _lbin_",$cntr; }
+          else { print $fh "      bins _sbin_",$cntr; }
+          if($is_array eq 1) {
+            print $LOG "ERR_015:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Array size is not defined in `GBINS_ARRAY macro. Macro:".$macro."\n";
+          }
+          print $fh " = {[",$f[0],":",$f[1],"]};\n";
+        }
+        else {
+          if($is_wildcard eq 1) { print $fh "      wildcard bins _wbin_",$cntr; }
+          elsif($is_ignore eq 1) { print $fh "      ignore_bins _ibin_",$cntr; }
+          elsif($is_illegal eq 1) { print $fh "      illegal_bins _lbin_",$cntr; }
+          else { print $fh "      bins _sbin_",$cntr; }
+          if($is_array eq 1) {
+            print $LOG "ERR_015:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Array size is not defined in `GBINS_ARRAY macro. Macro:".$macro."\n";
+          }
+          print $fh " = {",$_,"};\n"
+        }
+      }
+    }
+  }
+}
+
+###############################################################################
+# Subroutine: mentor_result 
+###############################################################################
+sub mentor_result {
+  my $file_name = shift;
+  open(my $fh, "<", $file_name) or die "Could not open file ".$file_name."!\n";
+  while (my $row = <$fh>) {
+    chomp $row;
+    if($row =~ m/^\s+(Coverpoint|Cross) .*\:\:.*/) {
+      (my $temp, my $cvg, my $label, my $percentage) = ($row =~ m/^\s+(Coverpoint|Cross) (\w+)\:\:(\w+)\s+(\d+\.\d+\%).*/);
+      chop $percentage;
+      $report{$cvg}{$label} = $percentage;
+    }
+    elsif($row =~ m/^\s+TYPE .*/) {
+      my @temp = split(/\s+/,$row);
+      my @cvg  = split(/\//,$temp[2]);
+      chop $temp[3];
+      $report{$cvg[-1]}{'covergroup'} = $temp[3];
+    }
+  }
+}
+
+###############################################################################
+# Subroutine: synopsys_result
+###############################################################################
+sub synopsys_result {
+  my $file_name   = shift;
+  my $group_start = 0;
+  my @temp_array0 = "";
+  my @temp_array1 = "";
+  my @temp_array2 = "";
+  my @temp_array3 = "";
+  my @coverpoint_ready = (0,0);
+  my @cross_ready      = (0,0);
+  my $cvg;
+
+  open (PTR,"<$file_name") or die "File not found";
+  foreach (<PTR>) {
+    if($group_start == 1) {
+      if(($coverpoint_ready[0] == 1) ||
+         ($cross_ready[0]      == 1)) {
+        if($_ =~ m/^$/) { 
+          $coverpoint_ready[0] = 0;
+          $cross_ready[0]      = 0;
+        }
+        else {
+          @temp_array1 = split(/\./, $_);
+          @temp_array2 = split(/\s/, $temp_array1[0]);
+          @temp_array3 = split(/\s/, $temp_array1[1]);
+          $report{$cvg}{$temp_array2[0]} = $temp_array2[($#temp_array2)].".".$temp_array3[0];
+          @temp_array0 = "";
+          @temp_array1 = "";
+          @temp_array2 = "";
+          @temp_array3 = "";
+        }
+      }
+      if(($_ =~ m/^VARIABLE.*/) && ($group_start == 1)) { $coverpoint_ready[0] = 1; }
+      elsif(($_ =~ m/^CROSS.*/) && ($group_start == 1)) { $cross_ready[0] = 1; }
+    }
+    if(($_ =~ m/^Summary for Group.*/) && (!($_ =~ m/^Summary for Group Instance.*/))) {
+      @temp_array0 = split(/(:)/, $_);
+      $cvg         = $temp_array0[($#temp_array0)];
+      $group_start = 1;
+      chomp $cvg;
+    }
+    elsif($_ =~ m/^\-\-\-\-\-\-\-\-.*/) {
+      $group_start = 0;
+      $cvg         = "";
+    }
+  }
+}
+
+###############################################################################
+# Subroutine: cadence_result 
+###############################################################################
+sub cadence_result {
+  my $file_name   = shift;
+  my $group_start = 0;
+  my @temp_array0 = "";
+  my @temp_array1 = "";
+  my @temp_array2 = "";
+  my $cvg;
+
+  open(PTR, "<$file_name") or die "File not found";
+  foreach (<PTR>) {
+    if($group_start == 1) {
+      if((($_ =~ m/.*coverpoint.*/) || ($_ =~ m/.*cross.*/)) && ($_ =~ m/^\|\-\-.*/)) {
+        @temp_array1    = split(/\%/, $_);
+        @temp_array2    = split(/\s/, $temp_array1[0]);
+        $temp_array2[0] = substr $temp_array2[0], 3;
+        $report{$cvg}{$temp_array2[0]} = $temp_array2[$#temp_array2];
+      }
+    }
+    if($_ =~ m/.*covergroup.*/) {
+      @temp_array0 = split(/covergroup/, $_);
+      @temp_array1 = split(/\s/, $temp_array0[1]);
+      $cvg         = $temp_array1[1];
+      $group_start = 1;
+    }
+    elsif(($_ =~ m/^$/) && ($group_start == 1)) {
+      $group_start = 0;
+      $cvg = "";
+    }
+  }
+}
