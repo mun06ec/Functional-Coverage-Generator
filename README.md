@@ -1,7 +1,7 @@
 # Functional-Coverage-Generator
 
 It is a tool to generate system verilog functional coverage.
-Please user guide given with this tool.
+Please refer user guide given with this tool.
 
 Note:
 Following tar files shall be downloaded from https://www.cpan.org/.
