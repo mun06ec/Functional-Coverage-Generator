@@ -22,6 +22,4 @@ Following modules shall be downloaded and installed in your system successfully 
 
 (8) Spreadsheet::WriteExcel (http://search.cpan.org/~jmcnamara/Spreadsheet-WriteExcel-2.40/lib/Spreadsheet/WriteExcel.pm)
 
-(9) Spreadsheet::ParseExcel (http://search.cpan.org/~dougw/Spreadsheet-ParseExcel-0.65/lib/Spreadsheet/ParseExcel.pm)
-
-(10) List::Util (http://search.cpan.org/~pevans/Scalar-List-Utils-1.49/lib/List/Util.pm)
+(9) List::Util (http://search.cpan.org/~pevans/Scalar-List-Utils-1.49/lib/List/Util.pm)
