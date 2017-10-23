@@ -11,7 +11,9 @@ my $error   = 0;
 my $is_comp = 1;
 my $gui     = 0;
 my $rusure;
+my %num_cg;
 our %report;
+our @bins;
 
 # Selects whether to open a GUI mode or in batch mode
 GetOptions ("g" => \$gui);
@@ -432,8 +434,7 @@ sub final {
       cadence_result($l_report_file);
     }
     elsif($var eq "USER") {
-# TODO: Error when file not found.
-      require "coverage_generator_user_cfg.pl.txt";
+      require "coverage_generator_user_cfg.pl";
       user_result($l_report_file);
     }
     else {
@@ -462,6 +463,7 @@ sub final {
     }
 
     # Use Spreadsheet::WriteExcel methods
+# TODO: Sheet name should be read from user input
     my $temp_worksheet  = $workbook->sheets(1);
 
     my $cvg_name;
@@ -598,21 +600,21 @@ sub final {
           }
           if($col_num{'Description'} ne "") {
             $cell_03_des = $worksheet->get_cell( $row, $col_num{'Description'} );
-            if(defined $cell_03_des) { 
+            if((defined $cell_03_des) && (($cell_03_des->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_des} = $cell_03_des->value(); 
               $coverpoint{$t_cp_name}{$row_des} =~ s/^\s+|\s+$//g;
             } 
           }
           if($col_num{'Bins'} ne "") {
             $cell_04_bin = $worksheet->get_cell( $row, $col_num{'Bins'} );
-            if(defined $cell_04_bin) { 
+            if((defined $cell_04_bin) && (($cell_04_bin->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_bin} = $cell_04_bin->value();
               $coverpoint{$t_cp_name}{$row_bin} =~ s/^\s+|\s+$//g; 
             }
           }
           if($col_num{'Weight'} ne "") {
             $cell_05_wei = $worksheet->get_cell( $row, $col_num{'Weight'} );
-            if(defined $cell_05_wei) { 
+            if((defined $cell_05_wei) && (($cell_05_wei->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_wei} = $cell_05_wei->value();
               $coverpoint{$t_cp_name}{$row_wei} =~ s/^\s+|\s+$//g; 
               if (!($coverpoint{$t_cp_name}{$row_wei} =~ /^\d+$/)) { 
@@ -623,7 +625,7 @@ sub final {
           }
           if($col_num{'Goal'} ne "") {
             $cell_06_goa = $worksheet->get_cell( $row, $col_num{'Goal'} );
-            if(defined $cell_06_goa) { 
+            if((defined $cell_06_goa) && (($cell_06_goa->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_goa} = $cell_06_goa->value();
               $coverpoint{$t_cp_name}{$row_goa} =~ s/^\s+|\s+$//g; 
               if (!($coverpoint{$t_cp_name}{$row_goa} =~ /^\d+$/)) { 
@@ -634,14 +636,14 @@ sub final {
           }
           if($col_num{'Comment'} ne "") {
             $cell_07_com = $worksheet->get_cell( $row, $col_num{'Comment'} );
-            if(defined $cell_07_com) { 
+            if((defined $cell_07_com) && (($cell_07_com->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_com} = $cell_07_com->value();
               $coverpoint{$t_cp_name}{$row_com} =~ s/^\s+|\s+$//g; 
             }
           }
           if($col_num{'At_least'} ne "") {
             $cell_08_atl = $worksheet->get_cell( $row, $col_num{'At_least'} );
-            if(defined $cell_08_atl) { 
+            if((defined $cell_08_atl) && (($cell_08_atl->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_atl} = $cell_08_atl->value();
               $coverpoint{$t_cp_name}{$row_atl} =~ s/^\s+|\s+$//g; 
               if (!($coverpoint{$t_cp_name}{$row_atl} =~ /^\d+$/)) { 
@@ -652,7 +654,7 @@ sub final {
           }
           if($col_num{'Auto_bin_max'} ne "") {
             $cell_09_aut = $worksheet->get_cell( $row, $col_num{'Auto_bin_max'} );
-            if(defined $cell_09_aut) { 
+            if((defined $cell_09_aut) && (($cell_09_aut->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_aut} = $cell_09_aut->value();
               $coverpoint{$t_cp_name}{$row_aut} =~ s/^\s+|\s+$//g; 
               if (!($coverpoint{$t_cp_name}{$row_aut} =~ /^\d+$/)) { 
@@ -663,7 +665,7 @@ sub final {
           }
           if($col_num{'Cross_num_print_missing'} ne "") {
             $cell_10_mis = $worksheet->get_cell( $row, $col_num{'Cross_num_print_missing'} );
-            if(defined $cell_10_mis) { 
+            if((defined $cell_10_mis) && (($cell_10_mis->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_mis} = $cell_10_mis->value();
               $coverpoint{$t_cp_name}{$row_mis} =~ s/^\s+|\s+$//g; 
               print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
@@ -672,7 +674,7 @@ sub final {
           }
           if($col_num{'Detect_overlap'} ne "") {
             $cell_11_ove = $worksheet->get_cell( $row, $col_num{'Detect_overlap'} );
-            if(defined $cell_11_ove) { 
+            if((defined $cell_11_ove) && (($cell_11_ove->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_ove} = $cell_11_ove->value();
               $coverpoint{$t_cp_name}{$row_ove} =~ s/^\s+|\s+$//g; 
               if (!($coverpoint{$t_cp_name}{$row_ove} =~ /^\d+$/)) { 
@@ -687,7 +689,7 @@ sub final {
           }
           if($col_num{'Name_per_instance'} ne "") {
             $cell_12_ins = $worksheet->get_cell( $row, $col_num{'Name_per_instance'} );
-            if(defined $cell_12_ins) { 
+            if((defined $cell_12_ins) && (($cell_12_ins->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_ins} = $cell_12_ins->value();
               $coverpoint{$t_cp_name}{$row_ins} =~ s/^\s+|\s+$//g; 
               print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
@@ -696,7 +698,7 @@ sub final {
           }
           if($col_num{'Variable'} ne "") {
             $cell_13_var = $worksheet->get_cell( $row, $col_num{'Variable'} );
-            if(defined $cell_13_var) { 
+            if((defined $cell_13_var) && (($cell_13_var->value()) ne "")) { 
               $coverpoint{$t_cp_name}{$row_var} = $cell_13_var->value();
               $coverpoint{$t_cp_name}{$row_var} =~ s/^\s+|\s+$//g; 
             }
@@ -718,21 +720,21 @@ sub final {
           }
           if($col_num{'Description'} ne "") {
             $cell_03_des = $worksheet->get_cell( $row, $col_num{'Description'} );
-            if(defined $cell_03_des) { 
+            if((defined $cell_03_des) && (($cell_03_des->value()) ne "")) { 
               $cross{$t_cr_name}{$row_des} = $cell_03_des->value(); 
               $cross{$t_cr_name}{$row_des} =~ s/^\s+|\s+$//g;
             }
           }
           if($col_num{'Bins'} ne "") {
             $cell_04_bin = $worksheet->get_cell( $row, $col_num{'Bins'} );
-            if(defined $cell_04_bin) { 
+            if((defined $cell_04_bin) && (($cell_04_bin->value()) ne "")) { 
               $cross{$t_cr_name}{$row_bin} = $cell_04_bin->value(); 
               $cross{$t_cr_name}{$row_bin} =~ s/^\s+|\s+$//g;
             }
           }
           if($col_num{'Weight'} ne "") {
             $cell_05_wei = $worksheet->get_cell( $row, $col_num{'Weight'} );
-            if(defined $cell_05_wei) { 
+            if((defined $cell_05_wei) && (($cell_05_wei->value()) ne "")) { 
               $cross{$t_cr_name}{$row_wei} = $cell_05_wei->value(); 
               $cross{$t_cr_name}{$row_wei} =~ s/^\s+|\s+$//g;
               if (!($cross{$t_cr_name}{$row_wei} =~ /^\d+$/)) { 
@@ -743,7 +745,7 @@ sub final {
           }
           if($col_num{'Goal'} ne "") {
             $cell_06_goa = $worksheet->get_cell( $row, $col_num{'Goal'} );
-            if(defined $cell_06_goa) { 
+            if((defined $cell_06_goa) && (($cell_06_goa->value()) ne "")) { 
               $cross{$t_cr_name}{$row_goa} = $cell_06_goa->value(); 
               $cross{$t_cr_name}{$row_goa} =~ s/^\s+|\s+$//g;
               if (!($cross{$t_cr_name}{$row_goa} =~ /^\d+$/)) { 
@@ -754,14 +756,14 @@ sub final {
           }
           if($col_num{'Comment'} ne "") {
             $cell_07_com = $worksheet->get_cell( $row, $col_num{'Comment'} );
-            if(defined $cell_07_com) { 
+            if((defined $cell_07_com) && (($cell_07_com->value()) ne "")) { 
               $cross{$t_cr_name}{$row_com} = $cell_07_com->value(); 
               $cross{$t_cr_name}{$row_com} =~ s/^\s+|\s+$//g;
             }
           }
           if($col_num{'At_least'} ne "") {
             $cell_08_atl = $worksheet->get_cell( $row, $col_num{'At_least'} );
-            if(defined $cell_08_atl) { 
+            if((defined $cell_08_atl) && (($cell_08_atl->value()) ne "")) { 
               $cross{$t_cr_name}{$row_atl} = $cell_08_atl->value(); 
               $cross{$t_cr_name}{$row_atl} =~ s/^\s+|\s+$//g;
               if (!($cross{$t_cr_name}{$row_atl} =~ /^\d+$/)) { 
@@ -772,7 +774,7 @@ sub final {
           }
           if($col_num{'Auto_bin_max'} ne "") {
             $cell_09_aut = $worksheet->get_cell( $row, $col_num{'Auto_bin_max'} );
-            if(defined $cell_09_aut) { 
+            if((defined $cell_09_aut) && (($cell_09_aut->value()) ne "")) { 
               $cross{$t_cr_name}{$row_aut} = $cell_09_aut->value(); 
               $cross{$t_cr_name}{$row_aut} =~ s/^\s+|\s+$//g;
               print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
@@ -781,7 +783,7 @@ sub final {
           }
           if($col_num{'Cross_num_print_missing'} ne "") {
             $cell_10_mis = $worksheet->get_cell( $row, $col_num{'Cross_num_print_missing'} ) ;
-            if(defined $cell_10_mis) { 
+            if((defined $cell_10_mis) && (($cell_10_mis->value()) ne "")) { 
               $cross{$t_cr_name}{$row_mis} = $cell_10_mis->value(); 
               $cross{$t_cr_name}{$row_mis} =~ s/^\s+|\s+$//g;
               if (!($cross{$t_cr_name}{$row_mis} =~ /^\d+$/)) { 
@@ -792,7 +794,7 @@ sub final {
           }
           if($col_num{'Detect_overlap'} ne "") {
             $cell_11_ove = $worksheet->get_cell( $row, $col_num{'Detect_overlap'} );
-            if(defined $cell_11_ove) { 
+            if((defined $cell_11_ove) && (($cell_11_ove->value()) ne "")) { 
               $cross{$t_cr_name}{$row_ove} = $cell_11_ove->value(); 
               $cross{$t_cr_name}{$row_ove} =~ s/^\s+|\s+$//g;
               print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
@@ -801,7 +803,7 @@ sub final {
           }
           if($col_num{'Name_per_instance'} ne "") {
             $cell_12_ins = $worksheet->get_cell( $row, $col_num{'Name_per_instance'} );
-            if(defined $cell_12_ins) { 
+            if((defined $cell_12_ins) && (($cell_12_ins->value()) ne "")) { 
               $cross{$t_cr_name}{$row_ins} = $cell_12_ins->value(); 
               $cross{$t_cr_name}{$row_ins} =~ s/^\s+|\s+$//g;
               print $LOG "ERR_013:FILE: ",__FILE__,"  LINE: ",__LINE__," ";
@@ -810,7 +812,7 @@ sub final {
           }
           if($col_num{'Variable'} ne "") {
             $cell_13_var = $worksheet->get_cell( $row, $col_num{'Variable'} );
-            if(defined $cell_13_var) { 
+            if((defined $cell_13_var) && (($cell_13_var->value()) ne "")) { 
               $cross{$t_cr_name}{$row_var} = $cell_13_var->value(); 
               $cross{$t_cr_name}{$row_var} =~ s/^\s+|\s+$//g;
             }
@@ -828,21 +830,21 @@ sub final {
 
         if($col_num{'Description'} ne "") {
           $cell_03_des = $worksheet->get_cell( $row, $col_num{'Description'} );
-          if(defined $cell_03_des) { 
+          if((defined $cell_03_des) && (($cell_03_des->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_des} = $cell_03_des->value(); 
             $covergroup{$t_cvg_name}{$row_des} =~ s/^\s+|\s+$//g;
           }
         }
         if($col_num{'Bins'} ne "") {
           $cell_04_bin = $worksheet->get_cell( $row, $col_num{'Bins'} );
-          if(defined $cell_04_bin) { 
+          if((defined $cell_04_bin) && (($cell_04_bin->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_bin} = $cell_04_bin->value(); 
             $covergroup{$t_cvg_name}{$row_bin} =~ s/^\s+|\s+$//g;
           }
         }
         if($col_num{'Weight'} ne "") {
           $cell_05_wei = $worksheet->get_cell( $row, $col_num{'Weight'} );
-          if(defined $cell_05_wei) { 
+          if((defined $cell_05_wei) && (($cell_05_wei->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_wei} = $cell_05_wei->value(); 
             $covergroup{$t_cvg_name}{$row_wei} =~ s/^\s+|\s+$//g;
             if (!($covergroup{$t_cvg_name}{$row_wei} =~ /^\d+$/)) { 
@@ -853,7 +855,7 @@ sub final {
         }
         if($col_num{'Goal'} ne "") {
           $cell_06_goa = $worksheet->get_cell( $row, $col_num{'Goal'} );
-          if(defined $cell_06_goa) { 
+          if((defined $cell_06_goa) && (($cell_06_goa->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_goa} = $cell_06_goa->value(); 
             $covergroup{$t_cvg_name}{$row_goa} =~ s/^\s+|\s+$//g;
             if (!($covergroup{$t_cvg_name}{$row_goa} =~ /^\d+$/)) { 
@@ -864,14 +866,14 @@ sub final {
         }
         if($col_num{'Comment'} ne "") {
           $cell_07_com = $worksheet->get_cell( $row, $col_num{'Comment'} );
-          if(defined $cell_07_com) { 
+          if((defined $cell_07_com) && (($cell_07_com->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_com} = $cell_07_com->value(); 
             $covergroup{$t_cvg_name}{$row_com} =~ s/^\s+|\s+$//g;
           }
         }
         if($col_num{'At_least'} ne "") {
           $cell_08_atl = $worksheet->get_cell( $row, $col_num{'At_least'} );
-          if(defined $cell_08_atl) { 
+          if((defined $cell_08_atl) && (($cell_08_atl->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_atl} = $cell_08_atl->value(); 
             $covergroup{$t_cvg_name}{$row_atl} =~ s/^\s+|\s+$//g;
             if (!($covergroup{$t_cvg_name}{$row_atl} =~ /^\d+$/)) { 
@@ -882,7 +884,7 @@ sub final {
         }
         if($col_num{'Auto_bin_max'} ne "") {
           $cell_09_aut = $worksheet->get_cell( $row, $col_num{'Auto_bin_max'} );
-          if(defined $cell_09_aut) { 
+          if((defined $cell_09_aut) && (($cell_09_aut->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_aut} = $cell_09_aut->value(); 
             $covergroup{$t_cvg_name}{$row_aut} =~ s/^\s+|\s+$//g;
             if (!($covergroup{$t_cvg_name}{$row_aut} =~ /^\d+$/)) { 
@@ -893,7 +895,7 @@ sub final {
         }
         if($col_num{'Cross_num_print_missing'} ne "") {
           $cell_10_mis = $worksheet->get_cell( $row, $col_num{'Cross_num_print_missing'} ) ;
-          if(defined $cell_10_mis) { 
+          if((defined $cell_10_mis) && (($cell_10_mis->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_mis} = $cell_10_mis->value(); 
             $covergroup{$t_cvg_name}{$row_mis} =~ s/^\s+|\s+$//g;
             if (!($covergroup{$t_cvg_name}{$row_mis} =~ /^\d+$/)) { 
@@ -904,7 +906,7 @@ sub final {
         }
         if($col_num{'Detect_overlap'} ne "") {
           $cell_11_ove = $worksheet->get_cell( $row, $col_num{'Detect_overlap'} );
-          if(defined $cell_11_ove) { 
+          if((defined $cell_11_ove) && (($cell_11_ove->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_ove} = $cell_11_ove->value(); 
             $covergroup{$t_cvg_name}{$row_ove} =~ s/^\s+|\s+$//g;
             if (!($covergroup{$t_cvg_name}{$row_ove} =~ /^\d+$/)) { 
@@ -919,14 +921,14 @@ sub final {
         }
         if($col_num{'Name_per_instance'} ne "") {
           $cell_12_ins = $worksheet->get_cell( $row, $col_num{'Name_per_instance'} );
-          if(defined $cell_12_ins) { 
+          if((defined $cell_12_ins) && (($cell_12_ins->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_ins} = $cell_12_ins->value(); 
             $covergroup{$t_cvg_name}{$row_ins} =~ s/^\s+|\s+$//g;
           }
         }
         if($col_num{'Variable'} ne "") {
           $cell_13_var = $worksheet->get_cell( $row, $col_num{'Variable'} );
-          if(defined $cell_13_var) { 
+          if((defined $cell_13_var) && (($cell_13_var->value()) ne "")) { 
             $covergroup{$t_cvg_name}{$row_var} = $cell_13_var->value(); 
             $covergroup{$t_cvg_name}{$row_var} =~ s/^\s+|\s+$//g;
           }
@@ -972,6 +974,8 @@ sub final {
         print $fh "\n";
       }
       print $fh "  covergroup ",$block_cov;
+	  $num_cg{$block_cov}{'coverpoint'} = 0;
+	  $num_cg{$block_cov}{'cross'} = 0;
     
       if (exists $covergroup{$block_name}{$row_var}) { print $fh $covergroup{$block_name}{$row_var}; }
       print $fh ";\n\n";
@@ -1020,7 +1024,10 @@ sub final {
             $error++;
             print $LOG "ERR_009:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Coverpoint name ".$cp_name." is not proper at row ",$coverpoint{$t_cp_name}{$row_num}," and will get compilation error.\n";
           }
-          else { print $fh "    ",$cp_name," : coverpoint "; }
+          else { 
+		    print $fh "    ",$cp_name," : coverpoint ";
+			$num_cg{$block_cov}{'coverpoint'} = $num_cg{$block_cov}{'coverpoint'} + 1;
+		  }
 
           if (exists $coverpoint{$key_cvp_nam}{$row_var}) { print $fh $coverpoint{$key_cvp_nam}{$row_var}; }
           else {
@@ -1096,7 +1103,10 @@ sub final {
             $error++;
             print $LOG "ERR_009:FILE: ",__FILE__,"  LINE: ",__LINE__," "." Cross name is not proper at row ",$cross{$t_cr_name}{$row_num}," and will get compilation error.\n";
           }
-          else { print $fh "    ",$cr_name," : cross "; }
+          else { 
+		    print $fh "    ",$cr_name," : cross "; 
+			$num_cg{$block_cov}{'cross'} = $num_cg{$block_cov}{'cross'} + 1;
+		  }
 
           if (exists $cross{$key_cro_nam}{$row_var}) { print $fh $cross{$key_cro_nam}{$row_var}; }
           else {
@@ -1206,6 +1216,9 @@ sub final {
   
     if(($error eq 0) && ($warning eq 0)) {
       print "\nCOVERAGE GENERATION SUCCESSFUL (File:",$block_cov_class,".sv)\n";
+	  foreach my $cvg_n(keys %num_cg) {
+	    print "Covergroup: ", $cvg_n, ", Total Coverpoint: ", $num_cg{$cvg_n}{'coverpoint'},", Total Cross: ", $num_cg{$cvg_n}{'cross'},"\n";
+	  }
     }
     else {
       print "\nCOVERAGE GENERATION FAILED. ERROR=",$error," and WARNING=",$warning,"\n";
@@ -1233,6 +1246,7 @@ sub macro_bins {
   my $is_wildcard = 0;
   my $is_pattern  = 0;
   my $is_array    = 0;
+  my $is_user     = 0;
   use List::Util 'first';
 
   if($macro =~ m/^\`GBINS_SIMPLE/) { $is_pattern = 0; }
@@ -1251,6 +1265,9 @@ sub macro_bins {
   elsif($macro =~ m/^\`GBINS_ILLEGAL/) {
     $is_pattern = 0;
     $is_illegal = 1;
+  }
+  elsif($macro =~ m/^\`GBINS_USER/) {
+    $is_user = 1;
   }
   # 001
   # 010
@@ -1321,7 +1338,14 @@ sub macro_bins {
   my @words  = split /;/,$mmr1;
   @words     = map{join(' ', split(' '))} @words;
 
-  if($is_pattern eq 1) {
+  if($is_user eq 1) {
+    require "coverage_generator_user_cfg.pl";
+    user_bins($macro);
+    foreach (@bins) {
+    	 print $fh $_,"\n";
+	  }
+  }
+  elsif($is_pattern eq 1) {
     my $B      = shift @words;
     my @abcd   = "";
     foreach (@words) {
